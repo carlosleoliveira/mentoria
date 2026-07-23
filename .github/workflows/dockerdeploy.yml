@@ -62,4 +62,4 @@ jobs:
       - name: Run Docker container
         run: |
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
-          docker run mentoria:$IMAGE_TAG
+          docker run ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
