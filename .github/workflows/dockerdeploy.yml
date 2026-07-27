@@ -67,10 +67,11 @@ jobs:
     branches:
       - main
     steps:
-  - uses: trstringer/manual-approval@v1
-    with:
-      approvers: user1,user2,org-team1
-      minimum-approvals: 1
+      - name: Request manual approval
+        uses: trstringer/manual-approval@v1
+        with:
+          approvers: user1,user2,org-team1
+          minimum-approvals: 1
       
   deploy:
     needs: build, test, approval
