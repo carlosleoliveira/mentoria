@@ -65,11 +65,11 @@ jobs:
     needs: [build, test]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
       - name: Request manual approval
         uses: trstringer/manual-approval@v1
-        permissions:
-          issues: write
         with:
           secret: ${{ github.TOKEN }}
           approvers: ${{ github.ACTOR}}
