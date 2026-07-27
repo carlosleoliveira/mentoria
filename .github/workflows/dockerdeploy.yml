@@ -78,6 +78,7 @@ jobs:
           issue-body: "Please approve or deny the deployment"
       
   deploy:
+    if: ${{ github.ref == 'refs/heads/main' }}
     needs: [build, test, approval]
     runs-on: ubuntu-latest
 
