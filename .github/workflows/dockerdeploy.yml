@@ -39,8 +39,7 @@ jobs:
 
   test:
     needs: build
-    branches:
-      - main
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -64,8 +63,7 @@ jobs:
   
   approval:
     needs: build, test
-    branches:
-      - main
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - name: Request manual approval
