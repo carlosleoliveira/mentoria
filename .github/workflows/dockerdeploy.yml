@@ -62,7 +62,7 @@ jobs:
         continue-on-error: false
   
   approval:
-    needs: build, test
+    needs: [build, test]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
@@ -73,7 +73,7 @@ jobs:
           minimum-approvals: 1
       
   deploy:
-    needs: build, test, approval
+    needs: [build, test, approval]
     runs-on: ubuntu-latest
 
     steps:
