@@ -66,6 +66,7 @@ jobs:
     needs: build, test
     branches:
       - main
+    runs-on: ubuntu-latest
     steps:
       - name: Request manual approval
         uses: trstringer/manual-approval@v1
