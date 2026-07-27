@@ -68,6 +68,8 @@ jobs:
     steps:
       - name: Request manual approval
         uses: trstringer/manual-approval@v1
+        permissions:
+          issues: write
         with:
           secret: ${{ github.TOKEN }}
           approvers: ${{ github.ACTOR}}
