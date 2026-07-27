@@ -69,7 +69,8 @@ jobs:
       - name: Request manual approval
         uses: trstringer/manual-approval@v1
         with:
-          approvers: user1,user2,org-team1
+          secret: ${{ github.TOKEN }}
+          approvers: carlosleoliveira
           minimum-approvals: 1
       
   deploy:
