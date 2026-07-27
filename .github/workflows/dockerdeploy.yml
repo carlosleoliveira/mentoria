@@ -70,7 +70,7 @@ jobs:
         uses: trstringer/manual-approval@v1
         with:
           secret: ${{ github.TOKEN }}
-          approvers: carlosleoliveira
+          approvers: user1
           minimum-approvals: 1
       
   deploy:
