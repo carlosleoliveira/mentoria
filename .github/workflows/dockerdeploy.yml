@@ -80,7 +80,7 @@ jobs:
   deploy:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: [build, test, approval]
-    if: ${{ github.ref == 'refs/heads/develop' }}
+    elif: ${{ github.ref == 'refs/heads/' }}
     needs: build
     runs-on: ubuntu-latest
 
