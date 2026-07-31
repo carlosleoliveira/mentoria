@@ -77,10 +77,39 @@ jobs:
           issue-title: "Manual Approval Required for Deployment"
           issue-body: "Please approve or deny the deployment"
       
-  deploy:
+  deploy-main:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: [build, test, approval]
     elif: ${{ github.ref == 'refs/heads/' }}
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.SECRET_KEY }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Docker Login
+        run: |
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+      - name: Run Docker container
+        run: |
+          IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
+          docker run ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
+  
+  deploy:
+    if: ${{ github.ref == 'refs/heads/develop' }}
     needs: build
     runs-on: ubuntu-latest
 
