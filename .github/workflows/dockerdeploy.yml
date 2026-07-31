@@ -108,7 +108,7 @@ jobs:
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
           docker run ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
   
-  deploy:
+  deploy-develop:
     if: ${{ github.ref == 'refs/heads/develop' }}
     needs: build
     runs-on: ubuntu-latest
