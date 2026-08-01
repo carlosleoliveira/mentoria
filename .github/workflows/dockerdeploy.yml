@@ -7,6 +7,22 @@ on:
       - develop
 
 jobs:
+  check-env:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Set Environment Name
+        id: set-env
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "env_name=production" >> $GITHUB_OUTPUT
+          else
+            echo "env_name=development" >> $GITHUB_OUTPUT
+          fi
+  
   build:
     runs-on: ubuntu-latest
 
@@ -32,7 +48,7 @@ jobs:
             IMAGE_TAG: ${{ github.event.repository.name }}-${{ github.run_number }}
         run: |
             # Build the Docker image
-            docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+            docker build --build-arg APP_ENV=${{ steps.set-env.outputs.env_name }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
             
             # Push the Docker image to Amazon ECR
             docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
@@ -104,7 +120,7 @@ jobs:
       - name: Run Docker container
         run: |
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
-          docker run -e APP_ENV=main ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
+          docker run -e APP_ENV=${{ steps.set-env.outputs.env_name }} ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
   
   deploy-develop:
     if: ${{ github.ref == 'refs/heads/develop' }}
@@ -133,4 +149,4 @@ jobs:
       - name: Run Docker container
         run: |
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
-          docker run -e APP_ENV=develop ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
+          docker run -e APP_ENV=${{ steps.set-env.outputs.env_name }} ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
