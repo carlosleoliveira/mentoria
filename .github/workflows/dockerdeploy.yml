@@ -24,6 +24,7 @@ jobs:
           fi
   
   build:
+    needs: check-env
     runs-on: ubuntu-latest
 
     steps:
@@ -120,7 +121,7 @@ jobs:
       - name: Run Docker container
         run: |
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
-          docker run -e APP_ENV=${{ steps.set-env.outputs.env_name }} ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
+          docker run -e APP_ENV=production ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
   
   deploy-develop:
     if: ${{ github.ref == 'refs/heads/develop' }}
@@ -149,4 +150,4 @@ jobs:
       - name: Run Docker container
         run: |
           IMAGE_TAG=${{ github.event.repository.name }}-${{ github.run_number }}
-          docker run -e APP_ENV=${{ steps.set-env.outputs.env_name }} ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
+          docker run -e APP_ENV=develop ${{ steps.login-ecr.outputs.registry }}/mentoria:$IMAGE_TAG
