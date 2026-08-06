@@ -1,10 +1,9 @@
 FROM python:3.8-slim
 
-ARG APP_ENV=development
-
+ARG APP_ENV
 ENV APP_ENV=${APP_ENV}
 
 COPY . /app
 WORKDIR /app
 
-RUN python hello.py
+CMD ["python", "hello.py"]

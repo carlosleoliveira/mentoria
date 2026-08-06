@@ -11,7 +11,8 @@ on:
 jobs:
   check-env:
     runs-on: ubuntu-latest
-
+    outputs:
+      env_name: ${{ steps.set-env.outputs.env_name }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v5
@@ -51,8 +52,7 @@ jobs:
             IMAGE_TAG: ${{ github.event.repository.name }}-${{ github.run_number }}
         run: |
             # Build the Docker image
-            docker build --build-arg APP_ENV=${{ steps.set-env.outputs.env_name }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-            
+            docker build --build-arg APP_ENV=${{ needs.check-env.outputs.env_name }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .            
             # Push the Docker image to Amazon ECR
             docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
