@@ -80,6 +80,40 @@ jobs:
         run: ruff format --diff --target-version=py39
         continue-on-error: false
   
+  pytest:
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: install pytest-cov
+        run: pip install pytest pytest-cov
+      - name: install dependencies
+        run: pip install -e .[test]
+      - name: run pytest --cov
+        run: |
+          set -e
+          pytest --cov=./ --cov-report=xml
+          : .coverage confuses coveralls, remove it
+          rm -f .coverage
+      #- name: upload coverage data to coveralls
+      #  uses: coverallsapp/github-action@v2.3.6
+      #  if: inputs.coveralls
+      #  with:
+      #    parallel: true
+      #    flag-name: python-${{ matrix.python-version }}
+      #    github-token: ${{ secrets.GITHUB_TOKEN }}
+      #- name: upload coverage data to codecov
+      #  uses: codecov/codecov-action@v5.5.1
+      #  if: inputs.codecov
+      #  with:
+      #    fail_ci_if_error: true
+  
   approval:
     needs: [build, test]
     if: ${{ github.ref == 'refs/heads/main' }}
