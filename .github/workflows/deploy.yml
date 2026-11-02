@@ -1,0 +1,153 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  APP_PORT: 8000          # ajuste para a porta que sua aplicação expõe
+  COVERAGE_MIN: 70
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. LINT — primeiro stage; se falhar, nada mais roda
+  # ---------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Instalar Ruff
+        run: pipx install ruff
+
+      - name: Lint
+        run: ruff check --output-format=github .
+
+      - name: Formatação
+        run: ruff format --check --diff .
+
+  # ---------------------------------------------------------------
+  # 2. TESTES + COBERTURA MÍNIMA
+  # ---------------------------------------------------------------
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt pytest pytest-cov
+
+      - name: Rodar testes com cobertura
+        run: |
+          pytest \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ env.COVERAGE_MIN }}
+
+  # ---------------------------------------------------------------
+  # 3. VARREDURA DE SEGURANÇA (Trivy nas dependências)
+  #    Quebra em HIGH/CRITICAL. Roda também em PR.
+  # ---------------------------------------------------------------
+  security-scan:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Trivy (filesystem / dependências)
+        uses: aquasecurity/trivy-action@0.35.0   # versão segura pós-incidente de mar/2026
+        with:
+          version: v0.69.3
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  # ---------------------------------------------------------------
+  # 4. BUILD + PUSH NO GHCR (só em push para main/develop)
+  # ---------------------------------------------------------------
+  build:
+    needs: [test, security-scan]
+    if: github.event_name != 'pull_request' && (github.ref_name == 'main' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+      app_env: ${{ steps.meta.outputs.app_env }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Definir nome, tag e ambiente
+        id: meta
+        run: |
+          IMAGE="${REGISTRY}/${GITHUB_REPOSITORY,,}"      # ghcr exige minúsculas
+          TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"         # develop-abc1234 / main-abc1234
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            APP_ENV=production
+          else
+            APP_ENV=development
+          fi
+          echo "image=$IMAGE"     >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "app_env=$APP_ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Login no GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build
+        run: |
+          docker build \
+            --build-arg APP_VERSION=${{ steps.meta.outputs.tag }} \
+            --build-arg APP_ENV=${{ steps.meta.outputs.app_env }} \
+            -t ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }} \
+            .
+
+      - name: Push
+        run: docker push ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+
+  # ---------------------------------------------------------------
+  # 5. DEPLOY — job único; o environment define o destino.
+  #    "production" tem required reviewers → pausa para aprovação.
+  # ---------------------------------------------------------------
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.build.outputs.app_env }}   # development (develop) | production (main)
+    permissions:
+      packages: read
+    steps:
+      - name: Login no GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull da imagem publicada
+        run: docker pull ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
+
+      - name: Subir container
+        run: |
+          docker run -d --name app -p ${APP_PORT}:${APP_PORT} \
+            ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
+          sleep 5
+          docker logs app
+          curl -fsS http://localhost:${APP_PORT}/ || (docker logs app && exit 1)
