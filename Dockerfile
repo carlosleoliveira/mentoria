@@ -1,9 +1,11 @@
-FROM python:3.8-slim
+FROM python:3.12-slim
 
-ARG APP_ENV
-ENV APP_ENV=${APP_ENV}
+ARG APP_ENV=development
+ARG APP_VERSION=dev
+ENV APP_ENV=${APP_ENV} \
+    APP_VERSION=${APP_VERSION}
 
-COPY . /app
 WORKDIR /app
+COPY hello.py /app/
 
 CMD ["python", "hello.py"]

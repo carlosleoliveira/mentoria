@@ -12,7 +12,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  APP_PORT: 8000          # ajuste para a porta que sua aplicação expõe
   COVERAGE_MIN: 70
 
 jobs:
@@ -49,10 +48,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          cache: pip
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt pytest pytest-cov
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov
 
       - name: Rodar testes com cobertura
         run: |
@@ -62,8 +62,9 @@ jobs:
             --cov-fail-under=${{ env.COVERAGE_MIN }}
 
   # ---------------------------------------------------------------
-  # 3. VARREDURA DE SEGURANÇA (Trivy nas dependências)
-  #    Quebra em HIGH/CRITICAL. Roda também em PR.
+  # 3. VARREDURA DE SEGURANÇA (Trivy na imagem Docker)
+  #    Builda a imagem localmente (sem push) e quebra em HIGH/CRITICAL.
+  #    Roda também em PR.
   # ---------------------------------------------------------------
   security-scan:
     needs: lint
@@ -71,12 +72,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Trivy (filesystem / dependências)
+      - name: Build local da imagem
+        run: docker build -t app-scan:${{ github.sha }} .
+
+      - name: Trivy (imagem)
         uses: aquasecurity/trivy-action@0.35.0   # versão segura pós-incidente de mar/2026
         with:
           version: v0.69.3
-          scan-type: fs
-          scan-ref: .
+          scan-type: image
+          image-ref: app-scan:${{ github.sha }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
@@ -144,10 +148,9 @@ jobs:
       - name: Pull da imagem publicada
         run: docker pull ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
 
-      - name: Subir container
+      - name: Rodar aplicação e conferir versão
         run: |
-          docker run -d --name app -p ${APP_PORT}:${APP_PORT} \
-            ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
-          sleep 5
-          docker logs app
-          curl -fsS http://localhost:${APP_PORT}/ || (docker logs app && exit 1)
+          OUTPUT=$(docker run --rm ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }})
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -qx "Version: ${{ needs.build.outputs.tag }}" \
+            || { echo "::error::Versão exibida não bate com a tag da imagem"; exit 1; }
