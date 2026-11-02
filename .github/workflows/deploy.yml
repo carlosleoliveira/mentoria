@@ -57,7 +57,7 @@ jobs:
       - name: Rodar testes com cobertura
         run: |
           pytest \
-            --cov=. \
+            --cov=hello \
             --cov-report=term-missing \
             --cov-fail-under=${{ env.COVERAGE_MIN }}
 
