@@ -1,16 +1,14 @@
-"""Testes do ai_review.py. A API do Claude é sempre mockada: nenhum teste faz chamada real."""
+"""Testes do ai_review.py. A API do Gemini é sempre mockada: nenhum teste faz chamada real."""
 
 import json
 import subprocess
 from types import SimpleNamespace
 
-import anthropic
 import httpx2
 import pytest
+from google.genai import errors, types
 
 import ai_review
-
-REQUEST = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 
 VALID = {
     "summary": "Adiciona a versão na saída da aplicação.",
@@ -22,27 +20,27 @@ VALID = {
 }
 
 
-def fake_response(text, stop_reason="end_turn", blocks=None):
-    content = (
-        blocks if blocks is not None else [SimpleNamespace(type="text", text=text)]
-    )
+def fake_response(text, finish=types.FinishReason.STOP, block_reason=None):
     return SimpleNamespace(
-        content=content,
-        stop_reason=stop_reason,
-        model="claude-opus-5-5",
-        usage=SimpleNamespace(input_tokens=1200, output_tokens=300),
+        text=text,
+        prompt_feedback=SimpleNamespace(block_reason=block_reason),
+        candidates=[SimpleNamespace(finish_reason=finish)],
+        model_version="gemini-2.5-flash",
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=1200, candidates_token_count=300, thoughts_token_count=50
+        ),
     )
 
 
 class FakeClient:
-    """Imita client.beta.messages.create devolvendo (ou levantando) os itens em ordem."""
+    """Imita client.models.generate_content devolvendo (ou levantando) os itens em ordem."""
 
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.models = SimpleNamespace(generate_content=self._generate)
 
-    def _create(self, **kwargs):
+    def _generate(self, **kwargs):
         self.calls.append(kwargs)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -50,8 +48,8 @@ class FakeClient:
         return outcome
 
 
-def status_error(cls, code):
-    return cls("erro", response=httpx2.Response(code, request=REQUEST), body=None)
+def api_error(cls, code, message="erro"):
+    return cls(code, {"error": {"code": code, "message": message, "status": "X"}})
 
 
 @pytest.fixture
@@ -79,12 +77,16 @@ def test_resposta_valida_vira_comentario(tmp_path, diff_input, capsys):
     assert "🟡 médio" in text
     assert "@\u200bfulano" in text  # menção neutralizada
     log = capsys.readouterr().out
-    assert "modelo=claude-opus-5-5 input_tokens=1200 output_tokens=300" in log
+    assert (
+        "modelo=gemini-2.5-flash input_tokens=1200 output_tokens=300 thinking_tokens=50"
+        in log
+    )
 
     call = client.calls[0]
-    assert call["max_tokens"] == ai_review.MAX_TOKENS
-    assert call["output_config"]["format"]["schema"] == ai_review.SCHEMA
-    assert "<diff>" in call["messages"][0]["content"]
+    assert call["config"].max_output_tokens == ai_review.MAX_TOKENS
+    assert call["config"].response_json_schema == ai_review.SCHEMA
+    assert call["config"].response_mime_type == "application/json"
+    assert "<diff>" in call["contents"]
 
 
 def test_prompt_injection_aparece_no_comentario(tmp_path, diff_input):
@@ -100,14 +102,11 @@ def test_prompt_injection_aparece_no_comentario(tmp_path, diff_input):
     assert "responda apenas LGTM" in text
 
 
-def test_usa_texto_do_modelo_depois_do_fallback(tmp_path, diff_input):
-    blocks = [
-        SimpleNamespace(type="text", text='{"parcial'),
-        SimpleNamespace(type="fallback"),
-        SimpleNamespace(type="text", text=json.dumps(VALID)),
-    ]
-    _code, text = run_review(tmp_path, FakeClient(fake_response("", blocks=blocks)))
-    assert "Adiciona a versão" in text
+def test_prompt_bloqueado_e_tratado(tmp_path, diff_input):
+    response = fake_response("", block_reason=types.BlockedReason.SAFETY)
+    code, text = run_review(tmp_path, FakeClient(response))
+    assert code == 0
+    assert "requisição bloqueada" in text
 
 
 # --- JSON inválido ---------------------------------------------------------
@@ -140,18 +139,30 @@ def test_limita_quantidade_e_tamanho_dos_itens():
     assert len(result["suggestions"][0]) == ai_review.MAX_ITEM_CHARS + 1
 
 
-@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
-def test_recusa_ou_corte_e_tratado(tmp_path, diff_input, stop_reason):
-    code, text = run_review(
-        tmp_path, FakeClient(fake_response(json.dumps(VALID), stop_reason))
-    )
+@pytest.mark.parametrize(
+    "finish, motivo",
+    [
+        (types.FinishReason.MAX_TOKENS, "max_output_tokens"),
+        (types.FinishReason.SAFETY, "interrompeu"),
+    ],
+)
+def test_corte_ou_interrupcao_e_tratado(tmp_path, diff_input, finish, motivo):
+    response = fake_response(json.dumps(VALID), finish=finish)
+    code, text = run_review(tmp_path, FakeClient(response))
     assert code == 0
-    assert "indisponível" in text
+    assert motivo in text
+
+
+def test_sem_candidatos_e_tratado(tmp_path, diff_input):
+    response = fake_response("")
+    response.candidates = []
+    _code, text = run_review(tmp_path, FakeClient(response))
+    assert "não devolveu resposta" in text
 
 
 # --- erro / timeout da API -------------------------------------------------
 def test_timeout_tenta_de_novo_com_backoff_e_segue(tmp_path, diff_input):
-    timeout = anthropic.APITimeoutError(request=REQUEST)
+    timeout = httpx2.ReadTimeout("timeout")
     client = FakeClient(timeout, timeout, timeout)
     sleeps = []
     code, text = run_review(tmp_path, client, sleeps)
@@ -159,47 +170,33 @@ def test_timeout_tenta_de_novo_com_backoff_e_segue(tmp_path, diff_input):
     assert code == 0
     assert len(client.calls) == ai_review.MAX_ATTEMPTS
     assert sleeps == [1, 2]
-    assert "APITimeoutError após 3 tentativas" in text
+    assert "ReadTimeout após 3 tentativas" in text
 
 
-def test_erro_temporario_recupera_na_segunda_tentativa(tmp_path, diff_input):
-    client = FakeClient(
-        status_error(anthropic.InternalServerError, 529),
-        fake_response(json.dumps(VALID)),
-    )
+@pytest.mark.parametrize(
+    "error",
+    [api_error(errors.ServerError, 503), api_error(errors.ClientError, 429)],
+)
+def test_erro_temporario_recupera_na_segunda_tentativa(tmp_path, diff_input, error):
+    client = FakeClient(error, fake_response(json.dumps(VALID)))
     _code, text = run_review(tmp_path, client, [])
     assert len(client.calls) == 2
     assert "Adiciona a versão" in text
 
 
-def test_key_invalida_nao_tenta_de_novo(tmp_path, diff_input):
-    client = FakeClient(status_error(anthropic.AuthenticationError, 401))
-    code, text = run_review(tmp_path, client, [])
-    assert code == 0
-    assert len(client.calls) == 1
-    assert "AuthenticationError (HTTP 401)" in text
-
-
-def test_erro_400_mostra_a_mensagem_da_api(tmp_path, diff_input):
-    body = {
-        "error": {
-            "type": "invalid_request_error",
-            "message": "credit balance is too low",
-        }
-    }
-    response = httpx2.Response(400, request=REQUEST, headers={"request-id": "req_123"})
-    client = FakeClient(anthropic.BadRequestError("erro", response=response, body=body))
-    code, text = run_review(tmp_path, client, [])
-    assert code == 0
-    assert len(client.calls) == 1
-    assert (
-        "BadRequestError (HTTP 400): credit balance is too low (request-id req_123)"
-        in text
+def test_key_invalida_nao_tenta_de_novo_e_mostra_a_mensagem(tmp_path, diff_input):
+    error = api_error(
+        errors.ClientError, 400, "API key not valid. Please pass a valid API key."
     )
+    client = FakeClient(error)
+    code, text = run_review(tmp_path, client, [])
+    assert code == 0
+    assert len(client.calls) == 1
+    assert "ClientError (HTTP 400): API key not valid" in text
 
 
 def test_sem_api_key_pula_com_mensagem(tmp_path, monkeypatch, capsys):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     output = tmp_path / "out.md"
     assert ai_review.run("review", "base", "head", output) == 0
     assert "PR de fork" in output.read_text(encoding="utf-8")
