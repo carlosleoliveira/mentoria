@@ -58,6 +58,7 @@ jobs:
         run: |
           pytest \
             --cov=hello \
+            --cov=ai_review \
             --cov-report=term-missing \
             --cov-fail-under=${{ env.COVERAGE_MIN }}
 
@@ -84,6 +85,62 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
+
+  # ---------------------------------------------------------------
+  # 3b. AI REVIEW — só em PR, depois de test + scan.
+  #     Advisory: comenta no PR, mas falha da IA não derruba a pipeline.
+  #     PR de fork não recebe secrets: o job pula com aviso.
+  # ---------------------------------------------------------------
+  ai-review:
+    needs: [test, security-scan]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read          # ler o código e o histórico
+      pull-requests: write    # publicar o comentário
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0      # histórico completo para o git diff base...head
+
+      - name: Verificar origem do PR
+        id: origin
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "fork=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR de fork ($HEAD_REPO): secrets não ficam disponíveis, AI review pulado."
+            echo "AI review pulado: PR vindo de fork não recebe secrets." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v6
+        if: steps.origin.outputs.fork == 'false'
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        if: steps.origin.outputs.fork == 'false'
+        run: pip install -r requirements.txt
+
+      - name: Gerar review com IA
+        if: steps.origin.outputs.fork == 'false'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}          # opcional; vazio = padrão do script
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python ai_review.py --mode review --base "$BASE_SHA" --head "$HEAD_SHA" --output ai-review.md
+
+      - name: Comentar no PR
+        if: steps.origin.outputs.fork == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR_NUMBER" --body-file ai-review.md
 
   # ---------------------------------------------------------------
   # 4. BUILD + PUSH NO GHCR (só em push para main/develop)
@@ -131,11 +188,62 @@ jobs:
         run: docker push ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
 
   # ---------------------------------------------------------------
+  # 4b. AI RELEASE NOTES — só na main, antes da aprovação manual.
+  #     Resume com IA o que vai para produção desde o último deploy
+  #     bem-sucedido e escreve no summary da execução.
+  # ---------------------------------------------------------------
+  ai-release-notes:
+    needs: build
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read          # ler o histórico
+      deployments: read       # achar o último deploy em produção
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Achar a última versão publicada em produção
+        id: last
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE=""
+          for DEPLOY in $(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&per_page=30" --jq '.[] | "\(.id):\(.sha)"'); do
+            STATE=$(gh api "repos/$GITHUB_REPOSITORY/deployments/${DEPLOY%%:*}/statuses" --jq '.[0].state')
+            if [ "$STATE" = "success" ]; then
+              BASE="${DEPLOY##*:}"
+              break
+            fi
+          done
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "Última versão em produção: ${BASE:-nenhuma encontrada}"
+
+      - name: Resumo da IA para quem aprova
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}          # opcional; vazio = padrão do script
+          BASE_SHA: ${{ steps.last.outputs.base }}
+        run: python ai_review.py --mode release-notes --base "$BASE_SHA" --head "$GITHUB_SHA" --output "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------
   # 5. DEPLOY — job único; o environment define o destino.
   #    "production" tem required reviewers → pausa para aprovação.
+  #    Na main espera o resumo da IA; na develop esse job é pulado,
+  #    por isso a condição explícita (advisory: não bloqueia o deploy).
   # ---------------------------------------------------------------
   deploy:
-    needs: build
+    needs: [build, ai-release-notes]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: ${{ needs.build.outputs.app_env }}   # development (develop) | production (main)
