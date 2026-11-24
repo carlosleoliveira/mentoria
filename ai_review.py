@@ -168,6 +168,13 @@ def build_message(log, diff, notes):
 # ---------------------------------------------------------------------------
 # Chamada ao Gemini: timeout, retry com backoff e validação da resposta
 # ---------------------------------------------------------------------------
+def describe(exc):
+    """Classe + código HTTP + mensagem da API (sem a key), para o log e o comentário."""
+    if isinstance(exc, errors.APIError):
+        return f"{type(exc).__name__} (HTTP {exc.code}): {_clip(str(exc.message), 300)}"
+    return type(exc).__name__
+
+
 def call_model(client, system, message, sleep=time.sleep):
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -186,18 +193,16 @@ def call_model(client, system, message, sleep=time.sleep):
         except errors.APIError as exc:
             if exc.code < 500 and exc.code != 429:
                 # 400 (key inválida, parâmetro errado), 403...: tentar de novo não resolve.
-                raise AIUnavailableError(
-                    f"{type(exc).__name__} (HTTP {exc.code}): {_clip(str(exc.message), 300)}"
-                ) from exc
+                raise AIUnavailableError(describe(exc)) from exc
             error = exc  # 429 (limite de uso) ou 5xx
 
         if attempt == MAX_ATTEMPTS:
             raise AIUnavailableError(
-                f"{type(error).__name__} após {MAX_ATTEMPTS} tentativas"
+                f"{describe(error)} após {MAX_ATTEMPTS} tentativas"
             ) from error
         delay = 2 ** (attempt - 1)
         print(
-            f"[ai] tentativa {attempt} falhou ({type(error).__name__}); nova tentativa em {delay}s"
+            f"[ai] tentativa {attempt} falhou ({describe(error)}); nova tentativa em {delay}s"
         )
         sleep(delay)
 

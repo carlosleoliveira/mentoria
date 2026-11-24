@@ -184,6 +184,15 @@ def test_erro_temporario_recupera_na_segunda_tentativa(tmp_path, diff_input, err
     assert "Adiciona a versão" in text
 
 
+def test_erro_5xx_persistente_mostra_codigo_e_mensagem(tmp_path, diff_input, capsys):
+    error = api_error(errors.ServerError, 503, "The model is overloaded.")
+    client = FakeClient(error, error, error)
+    code, text = run_review(tmp_path, client, [])
+    assert code == 0
+    assert "ServerError (HTTP 503): The model is overloaded. após 3 tentativas" in text
+    assert "tentativa 1 falhou (ServerError (HTTP 503)" in capsys.readouterr().out
+
+
 def test_key_invalida_nao_tenta_de_novo_e_mostra_a_mensagem(tmp_path, diff_input):
     error = api_error(
         errors.ClientError, 400, "API key not valid. Please pass a valid API key."
