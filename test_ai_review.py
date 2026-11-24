@@ -180,6 +180,24 @@ def test_key_invalida_nao_tenta_de_novo(tmp_path, diff_input):
     assert "AuthenticationError (HTTP 401)" in text
 
 
+def test_erro_400_mostra_a_mensagem_da_api(tmp_path, diff_input):
+    body = {
+        "error": {
+            "type": "invalid_request_error",
+            "message": "credit balance is too low",
+        }
+    }
+    response = httpx2.Response(400, request=REQUEST, headers={"request-id": "req_123"})
+    client = FakeClient(anthropic.BadRequestError("erro", response=response, body=body))
+    code, text = run_review(tmp_path, client, [])
+    assert code == 0
+    assert len(client.calls) == 1
+    assert (
+        "BadRequestError (HTTP 400): credit balance is too low (request-id req_123)"
+        in text
+    )
+
+
 def test_sem_api_key_pula_com_mensagem(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     output = tmp_path / "out.md"

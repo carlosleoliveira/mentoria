@@ -167,6 +167,15 @@ def build_message(log, diff, notes):
 # ---------------------------------------------------------------------------
 # Chamada ao Claude: timeout, retry com backoff e validação da resposta
 # ---------------------------------------------------------------------------
+def api_error_detail(exc):
+    """Mensagem de erro devolvida pela API (nunca contém a key) e o request-id para suporte."""
+    body = exc.body if isinstance(exc.body, dict) else {}
+    error = body.get("error") if isinstance(body.get("error"), dict) else {}
+    detail = _clip(str(error.get("message") or exc.message), 300)
+    request_id = getattr(exc, "request_id", None)
+    return f"{detail} (request-id {request_id})" if request_id else detail
+
+
 def call_claude(client, system, message, sleep=time.sleep):
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -189,7 +198,7 @@ def call_claude(client, system, message, sleep=time.sleep):
             if exc.status_code < 500:
                 # 401 (key inválida), 400, 403...: tentar de novo não resolve.
                 raise AIUnavailableError(
-                    f"{type(exc).__name__} (HTTP {exc.status_code})"
+                    f"{type(exc).__name__} (HTTP {exc.status_code}): {api_error_detail(exc)}"
                 ) from exc
             error = exc
 
