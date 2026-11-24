@@ -1,4 +1,4 @@
-"""Revisão de PR e resumo de release com Claude, para a pipeline de CI.
+"""Revisão de PR e resumo de release com Gemini, para a pipeline de CI.
 
 Modos:
   review         diff do PR -> comentário com resumo, riscos e sugestões
@@ -17,9 +17,12 @@ import subprocess
 import time
 from pathlib import Path
 
-import anthropic
+import httpx2
+from google import genai
+from google.genai import errors, types
 
-MODEL = os.environ.get("AI_MODEL", "claude-opus-5-5")
+# Modelo configurável pela variável AI_MODEL (vazia = padrão abaixo).
+MODEL = os.environ.get("AI_MODEL") or "gemini-2.5-flash"
 MAX_TOKENS = int(os.environ.get("AI_MAX_TOKENS", "8000"))
 MAX_INPUT_CHARS = int(os.environ.get("AI_MAX_INPUT_CHARS", "20000"))
 TIMEOUT_SECONDS = 60
@@ -58,14 +61,12 @@ SCHEMA = {
                     "description": {"type": "string"},
                 },
                 "required": ["severity", "description"],
-                "additionalProperties": False,
             },
         },
         "suggestions": {"type": "array", "items": {"type": "string"}},
         "suspicious_instructions": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["summary", "risks", "suggestions", "suspicious_instructions"],
-    "additionalProperties": False,
 }
 
 
@@ -165,42 +166,30 @@ def build_message(log, diff, notes):
 
 
 # ---------------------------------------------------------------------------
-# Chamada ao Claude: timeout, retry com backoff e validação da resposta
+# Chamada ao Gemini: timeout, retry com backoff e validação da resposta
 # ---------------------------------------------------------------------------
-def api_error_detail(exc):
-    """Mensagem de erro devolvida pela API (nunca contém a key) e o request-id para suporte."""
-    body = exc.body if isinstance(exc.body, dict) else {}
-    error = body.get("error") if isinstance(body.get("error"), dict) else {}
-    detail = _clip(str(error.get("message") or exc.message), 300)
-    request_id = getattr(exc, "request_id", None)
-    return f"{detail} (request-id {request_id})" if request_id else detail
-
-
-def call_claude(client, system, message, sleep=time.sleep):
+def call_model(client, system, message, sleep=time.sleep):
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            return client.beta.messages.create(
+            return client.models.generate_content(
                 model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=system,
-                messages=[{"role": "user", "content": message}],
-                output_config={
-                    "effort": "medium",
-                    "format": {"type": "json_schema", "schema": SCHEMA},
-                },
-                # Se o modelo recusar por política, a API tenta outro modelo na mesma chamada.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                contents=message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=MAX_TOKENS,
+                    response_mime_type="application/json",
+                    response_json_schema=SCHEMA,
+                ),
             )
-        except (anthropic.APIConnectionError, anthropic.RateLimitError) as exc:
-            error = exc  # inclui APITimeoutError
-        except anthropic.APIStatusError as exc:
-            if exc.status_code < 500:
-                # 401 (key inválida), 400, 403...: tentar de novo não resolve.
+        except httpx2.TransportError as exc:
+            error = exc  # timeout ou falha de rede
+        except errors.APIError as exc:
+            if exc.code < 500 and exc.code != 429:
+                # 400 (key inválida, parâmetro errado), 403...: tentar de novo não resolve.
                 raise AIUnavailableError(
-                    f"{type(exc).__name__} (HTTP {exc.status_code}): {api_error_detail(exc)}"
+                    f"{type(exc).__name__} (HTTP {exc.code}): {_clip(str(exc.message), 300)}"
                 ) from exc
-            error = exc
+            error = exc  # 429 (limite de uso) ou 5xx
 
         if attempt == MAX_ATTEMPTS:
             raise AIUnavailableError(
@@ -214,22 +203,35 @@ def call_claude(client, system, message, sleep=time.sleep):
 
 
 def parse_response(response):
-    if response.stop_reason == "refusal":
-        raise AIUnavailableError("o modelo recusou a requisição")
-    if response.stop_reason == "max_tokens":
-        raise AIUnavailableError("resposta cortada pelo limite de max_tokens")
+    feedback = response.prompt_feedback
+    if feedback and feedback.block_reason:
+        raise AIUnavailableError(
+            f"requisição bloqueada pelo modelo ({feedback.block_reason})"
+        )
+    if not response.candidates:
+        raise AIUnavailableError("o modelo não devolveu resposta")
+    finish = response.candidates[0].finish_reason
+    if finish == types.FinishReason.MAX_TOKENS:
+        raise AIUnavailableError("resposta cortada pelo limite de max_output_tokens")
+    if finish not in (None, types.FinishReason.STOP):
+        raise AIUnavailableError(f"o modelo interrompeu a resposta ({finish})")
 
-    text = ""
-    for block in response.content:
-        if block.type == "fallback":
-            text = ""  # vale só o texto do modelo que respondeu por último
-        elif block.type == "text":
-            text += block.text
     try:
-        data = json.loads(text)
+        data = json.loads(response.text or "")
     except json.JSONDecodeError as exc:
         raise AIUnavailableError("resposta não é um JSON válido") from exc
     return validate(data)
+
+
+def usage_of(response):
+    """Modelo e tokens consumidos, para o log e o rodapé."""
+    usage = response.usage_metadata
+    return {
+        "model": response.model_version or MODEL,
+        "input": (usage.prompt_token_count or 0) if usage else 0,
+        "output": (usage.candidates_token_count or 0) if usage else 0,
+        "thinking": (usage.thoughts_token_count or 0) if usage else 0,
+    }
 
 
 def _clip(text, limit=MAX_ITEM_CHARS):
@@ -334,10 +336,8 @@ def write(path, text):
 # Execução
 # ---------------------------------------------------------------------------
 def run(mode, base, head, output, client=None, sleep=time.sleep):
-    if client is None and not os.environ.get("ANTHROPIC_API_KEY"):
-        reason = (
-            "ANTHROPIC_API_KEY não disponível (PR de fork ou secret não configurado)"
-        )
+    if client is None and not os.environ.get("GEMINI_API_KEY"):
+        reason = "GEMINI_API_KEY não disponível (PR de fork ou secret não configurado)"
         print(f"::notice::IA pulada: {reason}")
         write(output, render_unavailable(mode, reason))
         return 0
@@ -351,11 +351,15 @@ def run(mode, base, head, output, client=None, sleep=time.sleep):
             return 0
 
         system = (PROMPTS_DIR / PROMPT_FILES[mode]).read_text(encoding="utf-8")
-        client = client or anthropic.Anthropic(max_retries=0, timeout=TIMEOUT_SECONDS)
-        response = call_claude(client, system, build_message(log, diff, notes), sleep)
-        usage = response.usage
+        client = client or genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options=types.HttpOptions(timeout=TIMEOUT_SECONDS * 1000),  # ms
+        )
+        response = call_model(client, system, build_message(log, diff, notes), sleep)
+        usage = usage_of(response)
         print(
-            f"[ai] modelo={response.model} input_tokens={usage.input_tokens} output_tokens={usage.output_tokens}"
+            f"[ai] modelo={usage['model']} input_tokens={usage['input']} "
+            f"output_tokens={usage['output']} thinking_tokens={usage['thinking']}"
         )
         data = parse_response(response)
     except subprocess.CalledProcessError as exc:
@@ -368,14 +372,17 @@ def run(mode, base, head, output, client=None, sleep=time.sleep):
         write(output, render_unavailable(mode, str(exc)))
         return 0
 
-    usage_text = f"Modelo `{response.model}`, {usage.input_tokens} tokens de entrada e {usage.output_tokens} de saída"
+    usage_text = (
+        f"Modelo `{usage['model']}`, {usage['input']} tokens de entrada, "
+        f"{usage['output']} de saída e {usage['thinking']} de raciocínio"
+    )
     write(output, render(mode, data, usage_text, notes))
     return 0
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Revisão de PR e resumo de release com Claude."
+        description="Revisão de PR e resumo de release com Gemini."
     )
     parser.add_argument("--mode", choices=list(PROMPT_FILES), required=True)
     parser.add_argument(

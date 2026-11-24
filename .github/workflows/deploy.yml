@@ -129,7 +129,8 @@ jobs:
       - name: Gerar review com IA
         if: steps.origin.outputs.fork == 'false'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}          # opcional; vazio = padrão do script
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python ai_review.py --mode review --base "$BASE_SHA" --head "$HEAD_SHA" --output ai-review.md
@@ -229,7 +230,8 @@ jobs:
 
       - name: Resumo da IA para quem aprova
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}          # opcional; vazio = padrão do script
           BASE_SHA: ${{ steps.last.outputs.base }}
         run: python ai_review.py --mode release-notes --base "$BASE_SHA" --head "$GITHUB_SHA" --output "$GITHUB_STEP_SUMMARY"
 
